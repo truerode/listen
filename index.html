@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-Ip8HA0uui2pitvpvSlD9Z1MVi+kqcxe2bwd5fC3Nv8M='; style-src 'sha256-svUu3wfmyk894yydIZFDUGYxvNHdmaHScwwxocPxPeI='; connect-src wss://stt-rt.soniox.com; img-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-FZRk98SfCyDdqt/5utKecW5UIFIgd1g/fYpUYzHzleU='; style-src 'sha256-svUu3wfmyk894yydIZFDUGYxvNHdmaHScwwxocPxPeI='; connect-src wss://stt-rt.soniox.com; img-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -63,6 +63,14 @@
   <select id="voice"></select>
   <label for="rate">Speed: <span id="rateVal">1.00</span>×</label>
   <input id="rate" type="range" min="0.7" max="1.5" step="0.05" value="1">
+  <label for="speed">Response speed</label>
+  <select id="speed">
+    <option value="fast">Fast (small accuracy cost)</option>
+    <option value="balanced">Balanced</option>
+    <option value="accurate">Most accurate (slower)</option>
+  </select>
+  <label for="ctxText">What you're listening to (optional, improves accuracy)</label>
+  <input id="ctxText" type="text" maxlength="500" placeholder="e.g. Syrian Arabic, meeting about school programs">
   <label for="langs">Languages you'll hear (e.g. ar or ar,tr — blank to auto-detect)</label>
   <input id="langs" type="text" value="ar" autocapitalize="off" autocorrect="off" spellcheck="false">
   <label class="row"><input id="showAr" type="checkbox"> Also show the original Arabic text</label>
@@ -95,9 +103,15 @@ const store = {
 const MODEL_RE = /^[a-z0-9-]{1,40}$/;
 const LANG_RE = /^[a-z]{2,3}$/;
 
+let resampler = null;
 let ws = null, ctx = null, stream = null, src = null, proc = null, wakeLock = null;
 let running = false, speakBuf = '', enText = '', arText = '', arWords = 0, enWords = 0;
 const OUT_RATE = 16000;
+const SPEED = {
+  fast:     { endpoint_latency_adjustment_level: 2, endpoint_sensitivity: 0.3, max_endpoint_delay_ms: 1000 },
+  balanced: { endpoint_latency_adjustment_level: 1, endpoint_sensitivity: 0.2, max_endpoint_delay_ms: 1500 },
+  accurate: {}
+};
 
 // ---------- settings ----------
 function show(el, on) { el.classList.toggle('hidden', !on); }
@@ -110,6 +124,8 @@ function loadSettings() {
   $('rate').value = store.get('sx_rate', '1');
   $('rateVal').textContent = Number($('rate').value).toFixed(2);
   $('showAr').checked = store.get('sx_ar', '1') === '1';
+  $('speed').value = ['fast','balanced','accurate'].includes(store.get('sx_speed','balanced')) ? store.get('sx_speed','balanced') : 'balanced';
+  $('ctxText').value = store.get('sx_ctx', '');
   $('cleanMic').checked = store.get('sx_clean', '0') === '1';
   show($('ar'), $('showAr').checked);
   $('model').value = store.get('sx_model', 'stt-rt-v5');
@@ -144,6 +160,8 @@ $('save').addEventListener('click', () => {
   store.set('sx_voice', $('voice').value);
   store.set('sx_rate', $('rate').value);
   store.set('sx_ar', $('showAr').checked ? '1' : '0');
+  store.set('sx_speed', $('speed').value);
+  store.set('sx_ctx', $('ctxText').value.trim().slice(0, 500));
   store.set('sx_clean', $('cleanMic').checked ? '1' : '0');
   store.set('sx_langs', langs.join(','));
   store.set('sx_catchup', $('catchup').checked ? '1' : '0');
@@ -260,6 +278,9 @@ async function start() {
       translation: { type: 'one_way', target_language: 'en' }
     };
     if (langs.length) cfg.language_hints = langs;
+    Object.assign(cfg, SPEED[store.get('sx_speed', 'balanced')] || SPEED.balanced);
+    const ctxText = store.get('sx_ctx', '').trim().slice(0, 500);
+    if (ctxText) cfg.context = { text: ctxText };
     ws.send(JSON.stringify(cfg));
     key = null; // drop our copy once sent
     setStatus('Listening…');
@@ -269,7 +290,8 @@ async function start() {
   ws.onclose = () => { if (running) { setStatus('Disconnected. Tap Start again.', true); stop(); } };
 
   src = ctx.createMediaStreamSource(stream);
-  proc = ctx.createScriptProcessor(4096, 1, 1);
+  resampler = makeResampler(ctx.sampleRate, OUT_RATE);
+  proc = ctx.createScriptProcessor(2048, 1, 1);
   proc.onaudioprocess = ev => {
     if (!ws || ws.readyState !== 1) return;
     const f = ev.inputBuffer.getChannelData(0);
@@ -279,7 +301,8 @@ async function start() {
     $('meter').style.width = Math.round(lvl * 100) + '%';
     // downsample to 16 kHz: 3x less data, so slow mobile connections don't fall behind
     if (ws.bufferedAmount > 256000) return; // connection backed up: drop audio rather than lag further
-    ws.send(downsample(f, ctx.sampleRate).buffer);
+    const out = resampler(f);
+    if (out.length) ws.send(out.buffer);
   };
   src.connect(proc); proc.connect(ctx.destination);
 
@@ -289,17 +312,35 @@ async function start() {
   $('go').textContent = 'Stop'; $('go').classList.add('on');
 }
 
-function downsample(f, inRate) {
-  const ratio = inRate / OUT_RATE;
-  const n = Math.floor(f.length / ratio);
-  const out = new Int16Array(n);
-  for (let i = 0; i < n; i++) {
-    const a = Math.floor(i * ratio), b = Math.min(f.length, Math.floor((i + 1) * ratio));
-    let sum = 0; for (let j = a; j < b; j++) sum += f[j];
-    const s = Math.max(-1, Math.min(1, sum / Math.max(1, b - a)));
-    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+// Proper resampler: low-pass filter (removes aliasing that muddies speech) + interpolation, continuous across buffers
+function makeResampler(inRate, outRate) {
+  const ratio = inRate / outRate;
+  if (ratio <= 1) return f => { const o = new Int16Array(f.length); for (let i = 0; i < f.length; i++) { const s = Math.max(-1, Math.min(1, f[i])); o[i] = s < 0 ? s * 0x8000 : s * 0x7fff; } return o; };
+  const TAPS = 63, fc = (0.45 * outRate) / inRate; // cutoff ~7.2 kHz
+  const h = new Float32Array(TAPS); let norm = 0;
+  for (let k = 0; k < TAPS; k++) {
+    const m = k - (TAPS - 1) / 2;
+    const sinc = m === 0 ? 2 * fc : Math.sin(2 * Math.PI * fc * m) / (Math.PI * m);
+    const w = 0.42 - 0.5 * Math.cos(2 * Math.PI * k / (TAPS - 1)) + 0.08 * Math.cos(4 * Math.PI * k / (TAPS - 1)); // Blackman
+    h[k] = sinc * w; norm += h[k];
   }
-  return out;
+  for (let k = 0; k < TAPS; k++) h[k] /= norm;
+  let hist = new Float32Array(TAPS - 1), pos = TAPS - 1;
+  const y = (x, i) => { let s = 0; for (let k = 0; k < TAPS; k++) s += h[k] * x[i - k]; return s; };
+  return f => {
+    const x = new Float32Array(hist.length + f.length); x.set(hist); x.set(f, hist.length);
+    const out = [];
+    while (Math.floor(pos) + 1 < x.length) {
+      const i0 = Math.floor(pos), t = pos - i0;
+      let s = y(x, i0) * (1 - t) + y(x, i0 + 1) * t;
+      s = Math.max(-1, Math.min(1, s));
+      out.push(s < 0 ? s * 0x8000 : s * 0x7fff);
+      pos += ratio;
+    }
+    const drop = Math.max(0, Math.floor(pos) - (TAPS - 1));
+    hist = x.slice(drop); pos -= drop;
+    return Int16Array.from(out);
+  };
 }
 
 function stop() {
@@ -311,7 +352,7 @@ function stop() {
   try { stream && stream.getTracks().forEach(t => t.stop()); } catch (x) {}
   try { ctx && ctx.close(); } catch (x) {}
   try { wakeLock && wakeLock.release(); } catch (x) {}
-  proc = src = stream = ctx = wakeLock = null;
+  proc = src = stream = ctx = wakeLock = resampler = null;
   $('meter').style.width = '0';
   flushSpeech();
   $('go').textContent = 'Start listening'; $('go').classList.remove('on');
