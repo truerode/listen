@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-cADkRy3s9Iqpzq7d/LUHu8sj/C4u2e//EHYxnAoyo2I='; style-src 'sha256-oQiffaDWHCS44qdZnxV3s3/bAknBXRQbpv8jDJtG1aU='; connect-src wss://stt-rt.soniox.com; img-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-Ip8HA0uui2pitvpvSlD9Z1MVi+kqcxe2bwd5fC3Nv8M='; style-src 'sha256-svUu3wfmyk894yydIZFDUGYxvNHdmaHScwwxocPxPeI='; connect-src wss://stt-rt.soniox.com; img-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -38,6 +38,9 @@
   #ar { direction:rtl; text-align:right; color:var(--muted); font-size:15px; margin-top:12px; border-top:1px solid var(--line); padding-top:10px; }
   #go { margin-top:14px; width:100%; padding:20px; font-size:20px; font-weight:600; border:0; border-radius:16px; background:var(--accent); color:#fff; }
   #go.on { background:var(--stop); }
+  #diag { display:flex; align-items:center; gap:10px; font-size:12px; color:var(--muted); margin:0 0 8px; }
+  #meterBox { flex:0 0 80px; height:8px; background:var(--line); border-radius:4px; overflow:hidden; }
+  #meter { height:100%; width:0; background:var(--accent); }
   #clear { margin-top:8px; width:100%; padding:10px; background:none; border:0; color:var(--muted); font-size:15px; }
 </style>
 </head>
@@ -62,7 +65,9 @@
   <input id="rate" type="range" min="0.7" max="1.5" step="0.05" value="1">
   <label for="langs">Languages you'll hear (e.g. ar or ar,tr — blank to auto-detect)</label>
   <input id="langs" type="text" value="ar" autocapitalize="off" autocorrect="off" spellcheck="false">
-  <label class="row"><input id="showAr" type="checkbox"> Also show the original text</label>
+  <label class="row"><input id="showAr" type="checkbox"> Also show the original Arabic text</label>
+  <label class="row"><input id="cleanMic" type="checkbox"> Clean-up mic audio (only for someone speaking right into the phone)</label>
+  <p class="hint">Leave off when listening to a room, TV or speaker: iPhone's clean-up treats distant voices as noise and removes them.</p>
   <label class="row"><input id="catchup" type="checkbox" checked> Speed up voice when it falls behind</label>
   <label for="model">Soniox model (only change if you get a model error)</label>
   <input id="model" type="text" value="stt-rt-v5" autocapitalize="off" autocorrect="off" spellcheck="false">
@@ -70,6 +75,7 @@
 </div>
 
 <div id="status">Tap Start. Use headphones for best results.</div>
+<div id="diag"><div id="meterBox"><div id="meter"></div></div><span id="counts">Mic level · heard 0 Arabic / 0 English words</span></div>
 <div id="out">
   <div id="en"></div><span id="enPartial"></span>
   <div id="ar" class="hidden"></div>
@@ -90,7 +96,8 @@ const MODEL_RE = /^[a-z0-9-]{1,40}$/;
 const LANG_RE = /^[a-z]{2,3}$/;
 
 let ws = null, ctx = null, stream = null, src = null, proc = null, wakeLock = null;
-let running = false, speakBuf = '', enText = '', arText = '';
+let running = false, speakBuf = '', enText = '', arText = '', arWords = 0, enWords = 0;
+const OUT_RATE = 16000;
 
 // ---------- settings ----------
 function show(el, on) { el.classList.toggle('hidden', !on); }
@@ -102,7 +109,8 @@ function loadSettings() {
   else store.del('sx_key'); // clean up any key saved by an earlier version
   $('rate').value = store.get('sx_rate', '1');
   $('rateVal').textContent = Number($('rate').value).toFixed(2);
-  $('showAr').checked = store.get('sx_ar', '0') === '1';
+  $('showAr').checked = store.get('sx_ar', '1') === '1';
+  $('cleanMic').checked = store.get('sx_clean', '0') === '1';
   show($('ar'), $('showAr').checked);
   $('model').value = store.get('sx_model', 'stt-rt-v5');
   $('langs').value = store.get('sx_langs', 'ar');
@@ -136,13 +144,14 @@ $('save').addEventListener('click', () => {
   store.set('sx_voice', $('voice').value);
   store.set('sx_rate', $('rate').value);
   store.set('sx_ar', $('showAr').checked ? '1' : '0');
+  store.set('sx_clean', $('cleanMic').checked ? '1' : '0');
   store.set('sx_langs', langs.join(','));
   store.set('sx_catchup', $('catchup').checked ? '1' : '0');
   store.set('sx_model', model);
   $('settings').classList.remove('open');
   setStatus('Saved.');
 });
-$('clear').addEventListener('click', () => { enText = ''; arText = ''; render('', ''); });
+$('clear').addEventListener('click', () => { enText = ''; arText = ''; arWords = enWords = 0; render('', ''); });
 
 function parseLangs(s) {
   const list = s.split(/[\s,]+/).map(x => x.trim().toLowerCase()).filter(Boolean);
@@ -172,12 +181,12 @@ function speakCompleteSentences() {
     say(m[1]);
     speakBuf = m[3];
   }
-  // Long run-on translation with no full stop: speak at a comma after ~18 words, or force at ~30
-  const words = speakBuf.trim().split(/\s+/).length;
-  if (words >= 18) {
+  // Don't wait for a full stop: speak at a comma after ~6 words, or force out after ~12
+  const words = speakBuf.trim() ? speakBuf.trim().split(/\s+/).length : 0;
+  if (words >= 6) {
     const c = Math.max(speakBuf.lastIndexOf(','), speakBuf.lastIndexOf('،'), speakBuf.lastIndexOf(';'));
     if (c > 0) { say(speakBuf.slice(0, c + 1)); speakBuf = speakBuf.slice(c + 1); }
-    else if (words >= 30) flushSpeech();
+    else if (words >= 12) flushSpeech();
   }
 }
 function flushSpeech() { say(speakBuf); speakBuf = ''; }
@@ -206,7 +215,8 @@ function handleMessage(e) {
     if (/^<.+>$/.test(txt)) { if (txt === '<end>') flushSpeech(); continue; }
     const isEn = t.translation_status === 'translation';
     if (t.is_final === true) {
-      if (isEn) { enText += txt; speakBuf += txt; } else { arText += txt; }
+      if (isEn) { enText += txt; speakBuf += txt; if (/^\s/.test(txt) || !enWords) enWords++; }
+      else { arText += txt; if (/^\s/.test(txt) || !arWords) arWords++; }
     } else {
       if (isEn) partialEn += txt; else partialAr += txt;
     }
@@ -215,6 +225,7 @@ function handleMessage(e) {
   if (arText.length > 20000) arText = arText.slice(-8000);
   speakCompleteSentences();
   render(partialEn, partialAr);
+  $('counts').textContent = 'Mic level · heard ' + arWords + ' Arabic / ' + enWords + ' English words';
   if (r.finished) flushSpeech();
 }
 
@@ -230,7 +241,8 @@ async function start() {
   say('Listening.');
 
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+    const clean = $('cleanMic').checked;
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: clean, noiseSuppression: clean, autoGainControl: clean } });
   } catch (err) { setStatus('Microphone blocked. Allow mic access in Settings → Apps → Safari.', true); return; }
 
   ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -242,7 +254,7 @@ async function start() {
       api_key: key,
       model: MODEL_RE.test(model) ? model : 'stt-rt-v5',
       audio_format: 'pcm_s16le',
-      sample_rate: Math.round(ctx.sampleRate),
+      sample_rate: OUT_RATE,
       num_channels: 1,
       enable_endpoint_detection: true,
       translation: { type: 'one_way', target_language: 'en' }
@@ -261,9 +273,13 @@ async function start() {
   proc.onaudioprocess = ev => {
     if (!ws || ws.readyState !== 1) return;
     const f = ev.inputBuffer.getChannelData(0);
-    const pcm = new Int16Array(f.length);
-    for (let i = 0; i < f.length; i++) { const s = Math.max(-1, Math.min(1, f[i])); pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff; }
-    ws.send(pcm.buffer);
+    // mic level meter
+    let sq = 0; for (let i = 0; i < f.length; i += 4) sq += f[i] * f[i];
+    const lvl = Math.min(1, Math.sqrt(sq / (f.length / 4)) * 6);
+    $('meter').style.width = Math.round(lvl * 100) + '%';
+    // downsample to 16 kHz: 3x less data, so slow mobile connections don't fall behind
+    if (ws.bufferedAmount > 256000) return; // connection backed up: drop audio rather than lag further
+    ws.send(downsample(f, ctx.sampleRate).buffer);
   };
   src.connect(proc); proc.connect(ctx.destination);
 
@@ -271,6 +287,19 @@ async function start() {
 
   running = true;
   $('go').textContent = 'Stop'; $('go').classList.add('on');
+}
+
+function downsample(f, inRate) {
+  const ratio = inRate / OUT_RATE;
+  const n = Math.floor(f.length / ratio);
+  const out = new Int16Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = Math.floor(i * ratio), b = Math.min(f.length, Math.floor((i + 1) * ratio));
+    let sum = 0; for (let j = a; j < b; j++) sum += f[j];
+    const s = Math.max(-1, Math.min(1, sum / Math.max(1, b - a)));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return out;
 }
 
 function stop() {
@@ -283,6 +312,7 @@ function stop() {
   try { ctx && ctx.close(); } catch (x) {}
   try { wakeLock && wakeLock.release(); } catch (x) {}
   proc = src = stream = ctx = wakeLock = null;
+  $('meter').style.width = '0';
   flushSpeech();
   $('go').textContent = 'Start listening'; $('go').classList.remove('on');
   if (!$('status').classList.contains('err')) setStatus('Stopped.');
