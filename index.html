@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-cADkRy3s9Iqpzq7d/LUHu8sj/C4u2e//EHYxnAoyo2I='; style-src 'sha256-oQiffaDWHCS44qdZnxV3s3/bAknBXRQbpv8jDJtG1aU='; connect-src wss://stt-rt.soniox.com; img-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Listen">
+<meta name="theme-color" content="#111418">
+<title>Arabic Listener</title>
+<style>
+  :root { --bg:#111418; --card:#1b2027; --text:#eef1f4; --muted:#8b96a3; --accent:#2f9e6e; --stop:#c0463c; --line:#2a313a; --warn:#e0b25a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:17px/1.45 -apple-system, system-ui, sans-serif;
+         padding:env(safe-area-inset-top) 16px calc(16px + env(safe-area-inset-bottom)); min-height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; align-items:center; justify-content:space-between; padding:14px 0 10px; }
+  h1 { font-size:20px; margin:0; }
+  #gear { background:none; border:0; color:var(--muted); font-size:15px; padding:8px; }
+  #settings { background:var(--card); border-radius:14px; padding:14px; margin-bottom:12px; display:none; }
+  #settings.open { display:block; }
+  label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+  input, select { width:100%; font-size:16px; padding:10px; border-radius:10px; border:1px solid var(--line); background:var(--bg); color:var(--text); }
+  input[type=range] { padding:0; }
+  .row { display:flex; gap:10px; align-items:center; }
+  .row input[type=checkbox] { width:auto; }
+  .hint { font-size:12px; color:var(--muted); margin:4px 0 0; }
+  .warn { color:var(--warn); }
+  .hidden { display:none; }
+  #save { margin-top:14px; width:100%; padding:12px; font-size:16px; border:0; border-radius:10px; background:var(--accent); color:#fff; }
+  #status { font-size:14px; color:var(--muted); min-height:20px; margin:4px 0 8px; }
+  #status.err { color:#ff8a80; }
+  #out { flex:1; background:var(--card); border-radius:14px; padding:14px; overflow-y:auto; min-height:40vh; max-height:62vh; }
+  #en { white-space:pre-wrap; font-size:20px; }
+  #enPartial { color:var(--muted); }
+  #ar { direction:rtl; text-align:right; color:var(--muted); font-size:15px; margin-top:12px; border-top:1px solid var(--line); padding-top:10px; }
+  #go { margin-top:14px; width:100%; padding:20px; font-size:20px; font-weight:600; border:0; border-radius:16px; background:var(--accent); color:#fff; }
+  #go.on { background:var(--stop); }
+  #clear { margin-top:8px; width:100%; padding:10px; background:none; border:0; color:var(--muted); font-size:15px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Arabic → English</h1>
+  <button id="gear" type="button">Settings</button>
+</header>
+
+<div id="settings">
+  <form id="keyForm" autocomplete="on">
+    <input id="user" name="username" type="text" autocomplete="username" value="soniox" class="hidden" aria-hidden="true" tabindex="-1">
+    <label for="key">Soniox API key (restricted to real-time only)</label>
+    <input id="key" name="password" type="password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Tap to fill from Passwords, or paste">
+    <p class="hint">Kept in memory only and cleared when the app closes. Best: save it in the iPhone Passwords app (protected by your iPhone passcode) and fill it in from there each time.</p>
+    <label class="row"><input id="remember" type="checkbox"> Remember key on this device</label>
+    <p id="rememberWarn" class="hint warn hidden">Less secure: the key is saved in this site's browser storage, where any code running on this site could read it.</p>
+  </form>
+  <label for="voice">Voice</label>
+  <select id="voice"></select>
+  <label for="rate">Speed: <span id="rateVal">1.00</span>×</label>
+  <input id="rate" type="range" min="0.7" max="1.5" step="0.05" value="1">
+  <label for="langs">Languages you'll hear (e.g. ar or ar,tr — blank to auto-detect)</label>
+  <input id="langs" type="text" value="ar" autocapitalize="off" autocorrect="off" spellcheck="false">
+  <label class="row"><input id="showAr" type="checkbox"> Also show the original text</label>
+  <label class="row"><input id="catchup" type="checkbox" checked> Speed up voice when it falls behind</label>
+  <label for="model">Soniox model (only change if you get a model error)</label>
+  <input id="model" type="text" value="stt-rt-v5" autocapitalize="off" autocorrect="off" spellcheck="false">
+  <button id="save" type="button">Save</button>
+</div>
+
+<div id="status">Tap Start. Use headphones for best results.</div>
+<div id="out">
+  <div id="en"></div><span id="enPartial"></span>
+  <div id="ar" class="hidden"></div>
+</div>
+<button id="go" type="button">Start listening</button>
+<button id="clear" type="button">Clear text</button>
+
+<script>
+'use strict';
+
+const $ = id => document.getElementById(id);
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+  del(k) { try { localStorage.removeItem(k); } catch (e) {} }
+};
+const MODEL_RE = /^[a-z0-9-]{1,40}$/;
+const LANG_RE = /^[a-z]{2,3}$/;
+
+let ws = null, ctx = null, stream = null, src = null, proc = null, wakeLock = null;
+let running = false, speakBuf = '', enText = '', arText = '';
+
+// ---------- settings ----------
+function show(el, on) { el.classList.toggle('hidden', !on); }
+function loadSettings() {
+  const remembered = store.get('sx_remember', '0') === '1';
+  $('remember').checked = remembered;
+  show($('rememberWarn'), remembered);
+  if (remembered) $('key').value = store.get('sx_key', '');
+  else store.del('sx_key'); // clean up any key saved by an earlier version
+  $('rate').value = store.get('sx_rate', '1');
+  $('rateVal').textContent = Number($('rate').value).toFixed(2);
+  $('showAr').checked = store.get('sx_ar', '0') === '1';
+  show($('ar'), $('showAr').checked);
+  $('model').value = store.get('sx_model', 'stt-rt-v5');
+  $('langs').value = store.get('sx_langs', 'ar');
+  $('catchup').checked = store.get('sx_catchup', '1') === '1';
+}
+function fillVoices() {
+  const voices = speechSynthesis.getVoices().filter(v => v.lang && v.lang.toLowerCase().startsWith('en'));
+  const saved = store.get('sx_voice', '');
+  const sel = $('voice');
+  while (sel.firstChild) sel.removeChild(sel.firstChild);
+  voices.forEach(v => {
+    const o = document.createElement('option');
+    o.value = v.voiceURI; o.textContent = v.name + ' (' + v.lang + ')';
+    if (v.voiceURI === saved) o.selected = true;
+    sel.appendChild(o);
+  });
+}
+speechSynthesis.onvoiceschanged = fillVoices;
+$('keyForm').addEventListener('submit', e => e.preventDefault());
+$('gear').addEventListener('click', () => $('settings').classList.toggle('open'));
+$('rate').addEventListener('input', () => { $('rateVal').textContent = Number($('rate').value).toFixed(2); });
+$('showAr').addEventListener('change', () => show($('ar'), $('showAr').checked));
+$('remember').addEventListener('change', () => show($('rememberWarn'), $('remember').checked));
+$('save').addEventListener('click', () => {
+  const model = $('model').value.trim();
+  const langs = parseLangs($('langs').value);
+  if (!MODEL_RE.test(model)) { setStatus('Model name looks wrong (letters, digits, dashes only).', true); return; }
+  if (langs === null) { setStatus('Languages must be codes like ar or ar,tr.', true); return; }
+  if ($('remember').checked) { store.set('sx_remember', '1'); store.set('sx_key', $('key').value.trim()); }
+  else { store.set('sx_remember', '0'); store.del('sx_key'); }
+  store.set('sx_voice', $('voice').value);
+  store.set('sx_rate', $('rate').value);
+  store.set('sx_ar', $('showAr').checked ? '1' : '0');
+  store.set('sx_langs', langs.join(','));
+  store.set('sx_catchup', $('catchup').checked ? '1' : '0');
+  store.set('sx_model', model);
+  $('settings').classList.remove('open');
+  setStatus('Saved.');
+});
+$('clear').addEventListener('click', () => { enText = ''; arText = ''; render('', ''); });
+
+function parseLangs(s) {
+  const list = s.split(/[\s,]+/).map(x => x.trim().toLowerCase()).filter(Boolean);
+  return list.every(x => LANG_RE.test(x)) ? list.slice(0, 5) : null;
+}
+function setStatus(msg, err) { $('status').textContent = msg; $('status').className = err ? 'err' : ''; }
+
+// ---------- speech out (iPhone's built-in voice) ----------
+const live = new Set(); // keep utterances referenced so iOS doesn't drop them
+function say(text) {
+  text = text.trim();
+  if (!text) return;
+  const u = new SpeechSynthesisUtterance(text);
+  live.add(u);
+  u.onend = u.onerror = () => live.delete(u);
+  const v = speechSynthesis.getVoices().find(x => x.voiceURI === $('voice').value);
+  if (v) u.voice = v;
+  u.lang = v ? v.lang : 'en-US';
+  let rate = Number($('rate').value) || 1;
+  if ($('catchup').checked && live.size > 2) rate = Math.min(rate + 0.1 * (live.size - 2), rate + 0.4);
+  u.rate = rate;
+  speechSynthesis.speak(u);
+}
+function speakCompleteSentences() {
+  let m;
+  while ((m = speakBuf.match(/^([\s\S]*?[.!?؟])(\s+|$)([\s\S]*)$/))) {
+    say(m[1]);
+    speakBuf = m[3];
+  }
+  // Long run-on translation with no full stop: speak at a comma after ~18 words, or force at ~30
+  const words = speakBuf.trim().split(/\s+/).length;
+  if (words >= 18) {
+    const c = Math.max(speakBuf.lastIndexOf(','), speakBuf.lastIndexOf('،'), speakBuf.lastIndexOf(';'));
+    if (c > 0) { say(speakBuf.slice(0, c + 1)); speakBuf = speakBuf.slice(c + 1); }
+    else if (words >= 30) flushSpeech();
+  }
+}
+function flushSpeech() { say(speakBuf); speakBuf = ''; }
+
+// ---------- display (textContent only: server text is never parsed as HTML) ----------
+function render(partialEn, partialAr) {
+  $('en').textContent = enText.slice(-4000);
+  $('enPartial').textContent = partialEn;
+  $('ar').textContent = (arText + partialAr).slice(-2000);
+  $('out').scrollTop = $('out').scrollHeight;
+}
+
+// ---------- Soniox ----------
+function handleMessage(e) {
+  if (typeof e.data !== 'string' || e.data.length > 1000000) return;
+  let r;
+  try { r = JSON.parse(e.data); } catch (x) { return; }
+  if (!r || typeof r !== 'object') return;
+  if (r.error_code) {
+    setStatus('Soniox error ' + String(r.error_code).slice(0, 10) + ': ' + String(r.error_message || '').slice(0, 200), true);
+    stop(); return;
+  }
+  let partialEn = '', partialAr = '';
+  for (const t of (Array.isArray(r.tokens) ? r.tokens : [])) {
+    const txt = typeof t.text === 'string' ? t.text : '';
+    if (/^<.+>$/.test(txt)) { if (txt === '<end>') flushSpeech(); continue; }
+    const isEn = t.translation_status === 'translation';
+    if (t.is_final === true) {
+      if (isEn) { enText += txt; speakBuf += txt; } else { arText += txt; }
+    } else {
+      if (isEn) partialEn += txt; else partialAr += txt;
+    }
+  }
+  if (enText.length > 20000) enText = enText.slice(-8000);
+  if (arText.length > 20000) arText = arText.slice(-8000);
+  speakCompleteSentences();
+  render(partialEn, partialAr);
+  if (r.finished) flushSpeech();
+}
+
+async function start() {
+  let key = $('key').value.trim();
+  if (!key) { $('settings').classList.add('open'); setStatus('Fill in your Soniox key, then tap Start.', true); $('key').focus(); return; }
+  if (!/^[\x21-\x7e]{10,200}$/.test(key)) { setStatus('That does not look like a Soniox key.', true); return; }
+  const model = store.get('sx_model', 'stt-rt-v5');
+  const langs = parseLangs(store.get('sx_langs', 'ar')) || ['ar'];
+
+  // Unlock iPhone speech while we still have the tap
+  speechSynthesis.cancel(); live.clear();
+  say('Listening.');
+
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+  } catch (err) { setStatus('Microphone blocked. Allow mic access in Settings → Apps → Safari.', true); return; }
+
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  await ctx.resume();
+
+  ws = new WebSocket('wss://stt-rt.soniox.com/transcribe-websocket');
+  ws.onopen = () => {
+    const cfg = {
+      api_key: key,
+      model: MODEL_RE.test(model) ? model : 'stt-rt-v5',
+      audio_format: 'pcm_s16le',
+      sample_rate: Math.round(ctx.sampleRate),
+      num_channels: 1,
+      enable_endpoint_detection: true,
+      translation: { type: 'one_way', target_language: 'en' }
+    };
+    if (langs.length) cfg.language_hints = langs;
+    ws.send(JSON.stringify(cfg));
+    key = null; // drop our copy once sent
+    setStatus('Listening…');
+  };
+  ws.onmessage = handleMessage;
+  ws.onerror = () => setStatus('Connection problem. Check your internet and API key.', true);
+  ws.onclose = () => { if (running) { setStatus('Disconnected. Tap Start again.', true); stop(); } };
+
+  src = ctx.createMediaStreamSource(stream);
+  proc = ctx.createScriptProcessor(4096, 1, 1);
+  proc.onaudioprocess = ev => {
+    if (!ws || ws.readyState !== 1) return;
+    const f = ev.inputBuffer.getChannelData(0);
+    const pcm = new Int16Array(f.length);
+    for (let i = 0; i < f.length; i++) { const s = Math.max(-1, Math.min(1, f[i])); pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff; }
+    ws.send(pcm.buffer);
+  };
+  src.connect(proc); proc.connect(ctx.destination);
+
+  try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (x) {}
+
+  running = true;
+  $('go').textContent = 'Stop'; $('go').classList.add('on');
+}
+
+function stop() {
+  running = false;
+  try { if (ws && ws.readyState === 1) ws.send(''); } catch (x) {}
+  const w = ws; ws = null;
+  setTimeout(() => { try { w && w.close(); } catch (x) {} }, 1500);
+  try { proc && proc.disconnect(); src && src.disconnect(); } catch (x) {}
+  try { stream && stream.getTracks().forEach(t => t.stop()); } catch (x) {}
+  try { ctx && ctx.close(); } catch (x) {}
+  try { wakeLock && wakeLock.release(); } catch (x) {}
+  proc = src = stream = ctx = wakeLock = null;
+  flushSpeech();
+  $('go').textContent = 'Start listening'; $('go').classList.remove('on');
+  if (!$('status').classList.contains('err')) setStatus('Stopped.');
+}
+
+// Wipe the key from the page when the app is closed (unless the user chose to remember it)
+window.addEventListener('pagehide', () => {
+  if (running) stop();
+  if (!$('remember').checked) $('key').value = '';
+});
+
+$('go').addEventListener('click', () => { running ? stop() : start(); });
+loadSettings();
+fillVoices();
+</script>
+</body>
+</html>
